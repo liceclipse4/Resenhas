@@ -21,6 +21,7 @@
     #info { display: none; margin-top: 12px; }
     #codigoTexto { font-size: 32px; letter-spacing: 4px; font-weight: bold; color: #4caf50; }
     #info button { margin: 4px 0; }
+    #stats { font-size: 13px; color: #aaa; margin-top: 6px; }
     video { display: none; width: 100%; max-width: 960px; margin-top: 12px; background: #000; border-radius: 8px; }
     video.previa { max-width: 320px; }
     #parar { display: none; margin-top: 12px; }
@@ -36,11 +37,9 @@
 
       <label>Qualidade:
         <select id="qualidade">
-          <option value="jogoleve" selected>Jogo leve (540p, 30 fps)</option>
-          <option value="jogo">Jogo (720p, 30 fps)</option>
-          <option value="minima">Mínima, para slides/texto (480p, 5 fps)</option>
-          <option value="baixa">Econômica, para slides/texto (720p, 10 fps)</option>
-          <option value="media">Média (720p, 15 fps)</option>
+          <option value="auto" selected>Automático (720p, se adapta)</option>
+          <option value="leve">Leve (540p, 30 fps)</option>
+          <option value="texto">Slides e texto (720p, 10 fps)</option>
           <option value="alta">Alta (1080p, 30 fps)</option>
         </select>
       </label>
@@ -55,6 +54,7 @@
         <button id="copiarLink" class="cinza">Copiar link</button><br>
         <button id="trocar" class="azul">Trocar tela</button>
         <div id="espectadores"></div>
+        <div id="stats"></div>
       </div>
     </div>
 
@@ -62,6 +62,13 @@
       <h3>Quero assistir</h3>
       <p>Digite o código que você recebeu.</p>
       <input type="text" id="codigo" maxlength="6" placeholder="CÓDIGO">
+      <label>Qualidade que quero receber:
+        <select id="qualidadeVer">
+          <option value="auto">Automática</option>
+          <option value="leve">Leve (540p)</option>
+          <option value="muitoleve">Muito leve (360p)</option>
+        </select>
+      </label>
       <p><button id="assistir">Assistir</button></p>
     </div>
   </div>
@@ -86,17 +93,32 @@
 
     // Quanto menor a resolução, os quadros por segundo e o bitrate, menos RAM e CPU
     const QUALIDADES = {
-      minima: { w: 854,  h: 480,  fps: 5,  bitrate: 400000,  hint: "detail" },
-      baixa:  { w: 1280, h: 720,  fps: 10, bitrate: 800000,  hint: "detail" },
-      media:  { w: 1280, h: 720,  fps: 15, bitrate: 1500000, hint: "motion" },
-      alta:   { w: 1920, h: 1080, fps: 30, bitrate: 3500000, hint: "motion" },
-      jogoleve: { w: 960,  h: 540,  fps: 30, bitrate: 1500000, hint: "motion" },
-      jogo:     { w: 1280, h: 720,  fps: 30, bitrate: 2500000, hint: "motion" }
+      auto:  { w: 1280, h: 720,  fps: 30, bitrate: 2500000, hint: "motion" },
+      leve:  { w: 960,  h: 540,  fps: 30, bitrate: 1500000, hint: "motion" },
+      texto: { w: 1280, h: 720,  fps: 10, bitrate: 800000,  hint: "detail" },
+      alta:  { w: 1920, h: 1080, fps: 30, bitrate: 3500000, hint: "motion" }
     };
+
+    // O espectador pode pedir menos qualidade (celular, internet fraca).
+    // Cada pessoa tem a sua própria conexão, então o ajuste vale só para ela.
+    const PEDIDOS = {
+      leve:      { w: 960, h: 540, fps: 30, bitrate: 1500000 },
+      muitoleve: { w: 640, h: 360, fps: 20, bitrate: 600000 }
+    };
+    function qualidadeEfetiva(call) {
+      const q = qualidade();
+      const r = PEDIDOS[call.qualidadePedida];
+      if (!r) return q;
+      return {
+        w: Math.min(q.w, r.w), h: Math.min(q.h, r.h),
+        fps: Math.min(q.fps, r.fps), bitrate: Math.min(q.bitrate, r.bitrate), hint: q.hint
+      };
+    }
 
     let peer = null, stream = null, calls = [], linkAtual = "";
     let modo = null; // "compartilhando" ou "assistindo"
     let tempoViewer = null;
+    let connViewer = null;
 
     function status(msg) { $("status").textContent = msg; }
     function qualidade() { return QUALIDADES[$("qualidade").value]; }
@@ -163,7 +185,7 @@
 
     // Limita o bitrate e os fps enviados a cada espectador
     function limitarBitrate(call) {
-      const q = qualidade();
+      const q = qualidadeEfetiva(call);
       call.peerConnection.getSenders().forEach(sender => {
         if (!sender.track || sender.track.kind !== "video") return;
         const p = sender.getParameters();
@@ -239,8 +261,16 @@
           return;
         }
         let call = null;
+        let pedida = null;
+        conn.on("data", d => {
+          if (d && d.tipo === "qualidade") {
+            pedida = d.valor;
+            if (call) { call.qualidadePedida = pedida; limitarBitrate(call); }
+          }
+        });
         conn.on("open", () => {
           call = peer.call(conn.peer, stream, { sdpTransform: preferirH264 });  // sempre manda a tela atual
+          call.qualidadePedida = pedida;
           calls.push(call);
           setTimeout(() => limitarBitrate(call), 1000);
           atualizarEspectadores();
@@ -316,6 +346,26 @@
       status("Tela trocada! Os espectadores já estão vendo a nova.");
     };
 
+    // Mostra o que está sendo enviado de verdade e o que está limitando a qualidade
+    async function mostrarEstatisticas() {
+      if (modo !== "compartilhando" || !calls.length) { $("stats").textContent = ""; return; }
+      try {
+        const rel = await calls[0].peerConnection.getStats();
+        let fps = null, motivo = null, w = null, h = null;
+        rel.forEach(r => {
+          if (r.type === "outbound-rtp" && r.kind === "video") {
+            fps = r.framesPerSecond; motivo = r.qualityLimitationReason; w = r.frameWidth; h = r.frameHeight;
+          }
+        });
+        if (!w || fps == null) return;
+        const nomes = { cpu: "processador", bandwidth: "internet" };
+        let texto = "Enviando " + w + "x" + h + " a " + Math.round(fps) + " fps";
+        if (motivo && motivo !== "none") texto += " (limitado pelo(a) " + (nomes[motivo] || motivo) + ")";
+        $("stats").textContent = texto;
+      } catch (e) {}
+    }
+    setInterval(mostrarEstatisticas, 3000);
+
     function atualizarEspectadores() {
       const n = calls.length;
       $("espectadores").textContent = n + (n === 1 ? " pessoa assistindo" : " pessoas assistindo");
@@ -354,7 +404,11 @@
       peer.on("open", () => {
         status("Procurando quem está compartilhando...");
         const conn = peer.connect(PREFIXO + codigo);
-        conn.on("open", () => status("Achou! Estabelecendo a conexão de vídeo..."));
+        connViewer = conn;
+        conn.on("open", () => {
+          status("Achou! Estabelecendo a conexão de vídeo...");
+          pedirQualidade();
+        });
         let cheio = false;
         conn.on("data", d => {
           if (d === "cheio") {
@@ -393,6 +447,7 @@
       if (stream) stream.getTracks().forEach(t => { t.onended = null; t.stop(); });
       if (peer) peer.destroy();
       clearTimeout(tempoViewer);
+      connViewer = null;
       stream = null; peer = null; calls = []; modo = null;
       video.srcObject = null;
       video.style.display = "none";
@@ -403,6 +458,20 @@
       if (manterMensagem !== true) status("Encerrado.");
     }
     $("parar").onclick = () => parar();
+
+    function pedirQualidade() {
+      try {
+        if (connViewer && connViewer.open) {
+          connViewer.send({ tipo: "qualidade", valor: $("qualidadeVer").value });
+        }
+      } catch (e) {}
+    }
+    $("qualidadeVer").onchange = pedirQualidade;
+
+    // No celular, já começa pedindo qualidade leve
+    const ehCelular = (navigator.userAgentData && navigator.userAgentData.mobile) ||
+                      /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    if (ehCelular) $("qualidadeVer").value = "leve";
 
     // Se abriu por um link com ?c=CODIGO, já preenche o código
     const codigoDaURL = new URLSearchParams(location.search).get("c");
