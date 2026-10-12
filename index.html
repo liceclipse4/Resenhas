@@ -36,12 +36,14 @@
 
       <label>Qualidade:
         <select id="qualidade">
-          <option value="baixa">Econômica (720p, 10 fps)</option>
-          <option value="media" selected>Média (720p, 15 fps)</option>
+          <option value="minima">Mínima (480p, 5 fps)</option>
+          <option value="baixa" selected>Econômica (720p, 10 fps)</option>
+          <option value="media">Média (720p, 15 fps)</option>
           <option value="alta">Alta (1080p, 30 fps)</option>
         </select>
       </label>
       <label><input type="checkbox" id="previa"> Mostrar prévia da minha tela (usa mais RAM)</label>
+      <label><input type="checkbox" id="audio"> Compartilhar áudio</label>
 
       <button id="compartilhar">Compartilhar minha tela</button>
 
@@ -71,19 +73,53 @@
     const $ = id => document.getElementById(id);
     const video = $("video");
     const PREFIXO = "telasimples-";
+    // Cada espectador faz seu computador codificar o vídeo mais uma vez,
+    // então o gasto de CPU/RAM cresce com o número de pessoas.
+    const MAX_ESPECTADORES = 4;
+
+    // OPCIONAL: servidor TURN próprio, para quem está em rede restrita (4G, empresa, escola).
+    // Crie uma conta grátis em metered.ca e preencha os dois campos abaixo.
+    const METERED_APP = "";   // exemplo: "meuapp" (o que vem antes de .metered.live)
+    const METERED_KEY = "";   // a API key da sua conta
 
     // Quanto menor a resolução, os quadros por segundo e o bitrate, menos RAM e CPU
     const QUALIDADES = {
-      baixa: { w: 1280, h: 720,  fps: 10, bitrate: 800000 },
-      media: { w: 1280, h: 720,  fps: 15, bitrate: 1500000 },
-      alta:  { w: 1920, h: 1080, fps: 30, bitrate: 3500000 }
+      minima: { w: 854,  h: 480,  fps: 5,  bitrate: 400000,  hint: "detail" },
+      baixa:  { w: 1280, h: 720,  fps: 10, bitrate: 800000,  hint: "detail" },
+      media:  { w: 1280, h: 720,  fps: 15, bitrate: 1500000, hint: "motion" },
+      alta:   { w: 1920, h: 1080, fps: 30, bitrate: 3500000, hint: "motion" }
     };
 
     let peer = null, stream = null, calls = [], linkAtual = "";
     let modo = null; // "compartilhando" ou "assistindo"
+    let tempoViewer = null;
 
     function status(msg) { $("status").textContent = msg; }
     function qualidade() { return QUALIDADES[$("qualidade").value]; }
+
+    let configCache = null;
+    async function obterConfig() {
+      if (configCache) return configCache;
+      let base = [];
+      try { base = peerjs.util.defaultConfig.iceServers || []; } catch (e) {}
+      if (!base.length) {
+        base = [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "turn:eu-0.turn.peerjs.com:3478", username: "peerjs", credential: "peerjsp" },
+          { urls: "turn:us-0.turn.peerjs.com:3478", username: "peerjs", credential: "peerjsp" }
+        ];
+      }
+      let extra = [{ urls: "stun:stun1.l.google.com:19302" }, { urls: "stun:stun.relay.metered.ca:80" }];
+      if (METERED_APP && METERED_KEY) {
+        try {
+          const r = await fetch("https://" + METERED_APP + ".metered.live/api/v1/turn/credentials?apiKey=" + METERED_KEY);
+          const d = await r.json();
+          if (Array.isArray(d)) extra = extra.concat(d);
+        } catch (e) {}
+      }
+      configCache = { iceServers: base.concat(extra) };
+      return configCache;
+    }
 
     function gerarCodigo() {
       const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -92,12 +128,33 @@
       return s;
     }
 
-    function pedirTela() {
+    async function pedirTela() {
       const q = qualidade();
-      return navigator.mediaDevices.getDisplayMedia({
+      const s = await navigator.mediaDevices.getDisplayMedia({
         video: { width: { max: q.w }, height: { max: q.h }, frameRate: { ideal: q.fps, max: q.fps } },
-        audio: true
+        audio: $("audio").checked
       });
+      s.getVideoTracks().forEach(t => { t.contentHint = q.hint; });
+      return s;
+    }
+
+    // Coloca o H.264 na frente da lista de codecs: na maioria dos computadores
+    // ele é codificado pela placa de vídeo, o que alivia muito o processador
+    function preferirH264(sdp) {
+      const linhas = sdp.split("\r\n");
+      const i = linhas.findIndex(l => l.startsWith("m=video"));
+      if (i === -1) return sdp;
+      const h264 = linhas
+        .filter(l => /^a=rtpmap:\d+ H264\//i.test(l))
+        .map(l => l.match(/^a=rtpmap:(\d+)/)[1]);
+      if (!h264.length) return sdp;
+      const partes = linhas[i].split(" ");
+      const cabecalho = partes.slice(0, 3);
+      const codecs = partes.slice(3);
+      linhas[i] = cabecalho
+        .concat(h264.filter(c => codecs.includes(c)), codecs.filter(c => !h264.includes(c)))
+        .join(" ");
+      return linhas.join("\r\n");
     }
 
     // Limita o bitrate e os fps enviados a cada espectador
@@ -109,6 +166,8 @@
         if (!p.encodings || !p.encodings.length) p.encodings = [{}];
         p.encodings[0].maxBitrate = q.bitrate;
         p.encodings[0].maxFramerate = q.fps;
+        const largura = sender.track.getSettings().width;
+        if (largura) p.encodings[0].scaleResolutionDownBy = Math.max(1, largura / q.w);
         sender.setParameters(p).catch(() => {});
       });
     }
@@ -149,9 +208,15 @@
       abrirComoCompartilhador(0);
     };
 
-    function abrirComoCompartilhador(tentativa) {
+    async function abrirComoCompartilhador(tentativa) {
       const codigo = gerarCodigo();
-      peer = new Peer(PREFIXO + codigo);
+      const config = await obterConfig();
+      if (!stream) return; // clicou em Parar enquanto carregava
+      peer = new Peer(PREFIXO + codigo, { config });
+
+      peer.on("disconnected", () => {
+        if (peer && !peer.destroyed) peer.reconnect();
+      });
 
       peer.on("open", () => {
         linkAtual = location.origin + location.pathname + "?c=" + codigo;
@@ -162,12 +227,42 @@
       });
 
       peer.on("connection", conn => {
+        if (calls.length >= MAX_ESPECTADORES) {
+          conn.on("open", () => {
+            conn.send("cheio");
+            setTimeout(() => conn.close(), 500);
+          });
+          return;
+        }
         let call = null;
         conn.on("open", () => {
-          call = peer.call(conn.peer, stream);  // sempre manda a tela atual
+          call = peer.call(conn.peer, stream, { sdpTransform: preferirH264 });  // sempre manda a tela atual
           calls.push(call);
           setTimeout(() => limitarBitrate(call), 1000);
           atualizarEspectadores();
+
+          // Se a conexão de alguém falhar ou travar, libera a vaga dele
+          const minhaCall = call;
+          const descartar = () => {
+            if (!calls.includes(minhaCall)) return;
+            calls = calls.filter(c => c !== minhaCall);
+            atualizarEspectadores();
+          };
+          const derrubar = () => {
+            descartar();
+            try { minhaCall.close(); } catch (e) {}
+            try { conn.close(); } catch (e) {}
+          };
+          minhaCall.on("close", descartar);
+          minhaCall.on("error", descartar);
+          minhaCall.peerConnection.addEventListener("iceconnectionstatechange", () => {
+            const st = minhaCall.peerConnection.iceConnectionState;
+            if (st === "failed" || st === "closed") derrubar();
+          });
+          setTimeout(() => {
+            const st = minhaCall.peerConnection.iceConnectionState;
+            if (st !== "connected" && st !== "completed") derrubar();
+          }, 25000);
         });
         conn.on("close", () => {
           if (call) {
@@ -233,23 +328,45 @@
     };
 
     // ---------- QUEM ASSISTE ----------
-    $("assistir").onclick = () => {
+    $("assistir").onclick = async () => {
       const codigo = $("codigo").value.trim().toUpperCase();
       if (!codigo) { status("Digite o código primeiro."); return; }
       modo = "assistindo";
-      status("Conectando...");
+      status("Conectando ao servidor...");
       bloquearBotoes();
 
-      peer = new Peer();
+      const config = await obterConfig();
+      if (modo !== "assistindo") return; // clicou em Parar enquanto carregava
+      peer = new Peer({ config });
+      const meuPeer = peer;
+      let conectou = false;
+
+      tempoViewer = setTimeout(() => {
+        if (conectou || peer !== meuPeer) return;
+        status("Não conseguiu conectar. Pode ser a rede (4G, wi-fi de empresa ou escola). Tente trocar de rede e clique em Assistir de novo.");
+        parar(true);
+      }, 25000);
 
       peer.on("open", () => {
+        status("Procurando quem está compartilhando...");
         const conn = peer.connect(PREFIXO + codigo);
-        conn.on("close", () => status("O compartilhamento terminou."));
+        conn.on("open", () => status("Achou! Estabelecendo a conexão de vídeo..."));
+        let cheio = false;
+        conn.on("data", d => {
+          if (d === "cheio") {
+            cheio = true;
+            status("Essa transmissão está cheia (limite de " + MAX_ESPECTADORES + " pessoas). Tente de novo mais tarde.");
+            parar(true);
+          }
+        });
+        conn.on("close", () => { if (!cheio) status("O compartilhamento terminou."); });
       });
 
       peer.on("call", call => {
         call.answer(); // aceita a chamada sem enviar nada
         call.on("stream", s => {
+          conectou = true;
+          clearTimeout(tempoViewer);
           video.classList.remove("previa");
           video.srcObject = s;
           video.style.display = "block";
@@ -271,6 +388,7 @@
     function parar(manterMensagem) {
       if (stream) stream.getTracks().forEach(t => { t.onended = null; t.stop(); });
       if (peer) peer.destroy();
+      clearTimeout(tempoViewer);
       stream = null; peer = null; calls = []; modo = null;
       video.srcObject = null;
       video.style.display = "none";
