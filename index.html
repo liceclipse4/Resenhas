@@ -41,6 +41,7 @@
   <div class="cards">
     <div class="card">
       <h3>Quero compartilhar</h3>
+      <p id="avisoCelular" style="display:none;background:#3a2a00;color:#ffcc66;border-radius:8px;padding:10px;font-size:14px;margin-top:0"></p>
 
       <label>Qualidade:
         <select id="qualidade">
@@ -126,6 +127,17 @@
     let peer = null, stream = null, calls = [], linkAtual = "";
     let modo = null; // "compartilhando" ou "assistindo"
     let tempoViewer = null, tempoRetry = null, connViewer = null, codigoViewer = null;
+
+    // Celulares (Chrome Android, Safari iPhone) não conseguem capturar a tela pelo navegador
+    function motivoSemCompartilhar() {
+      if (!window.isSecureContext) {
+        return "Esta página precisa estar em HTTPS para compartilhar a tela (não funciona abrindo o arquivo direto ou em http).";
+      }
+      if (!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)) {
+        return "Este aparelho/navegador não permite compartilhar a tela. Para compartilhar, abra esta página no computador (Chrome, Edge ou Firefox). Aqui você pode ASSISTIR normalmente ao lado.";
+      }
+      return null;
+    }
 
     function status(msg) { $("status").textContent = msg; }
     function qualidade() { return QUALIDADES[$("qualidade").value]; }
@@ -268,6 +280,8 @@
 
     // ---------- QUEM COMPARTILHA ----------
     $("compartilhar").onclick = async () => {
+      const semSuporte = motivoSemCompartilhar();
+      if (semSuporte) { status(semSuporte); return; }
       const digitado = $("salaFixa").value.trim();
       const fixo = limparCodigo(digitado);
       if (digitado && fixo.length < 3) {
@@ -390,6 +404,7 @@
 
     // ---------- TROCAR TELA SEM DERRUBAR A TRANSMISSÃO ----------
     $("trocar").onclick = async () => {
+      if (motivoSemCompartilhar()) return;
       let nova;
       try {
         nova = await pedirTela();
@@ -576,7 +591,7 @@
       $("parar").style.display = "none";
       $("info").style.display = "none";
       $("barraVer").style.display = "none";
-      $("compartilhar").disabled = false;
+      $("compartilhar").disabled = !!motivoSemCompartilhar();
       $("assistir").disabled = false;
       document.body.classList.remove("compacto");
       atualizarTitulo();
@@ -595,6 +610,13 @@
     $("salaFixa").value = limparCodigo(lerPref("sala", ""));
     let qVerSalva = lerPref("qualidadeVer", ehCelular ? "leve" : "auto");
     $("qualidadeVer").value = (qVerSalva === "auto" || PEDIDOS[qVerSalva]) ? qVerSalva : "auto";
+
+    const _motivo = motivoSemCompartilhar();
+    if (_motivo) {
+      $("avisoCelular").textContent = _motivo;
+      $("avisoCelular").style.display = "block";
+      $("compartilhar").disabled = true;
+    }
 
     // Link com ?c=CODIGO: entra direto. Com &ver=1, mostra só o vídeo (modo compacto)
     const params = new URLSearchParams(location.search);
