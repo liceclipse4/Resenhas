@@ -13,18 +13,26 @@
     button.vermelho { background: #e53935; }
     button.cinza { background: #555; }
     button.azul { background: #1e88e5; }
+    button.pequeno { font-size: 14px; padding: 6px 12px; }
     button:disabled { opacity: .4; cursor: not-allowed; }
-    input[type=text] { font-size: 18px; padding: 8px; width: 140px; text-align: center; text-transform: uppercase; border-radius: 8px; border: 1px solid #444; background: #000; color: #fff; }
+    input[type=text] { font-size: 18px; padding: 8px; width: 150px; text-align: center; text-transform: uppercase; border-radius: 8px; border: 1px solid #444; background: #000; color: #fff; }
     select { font-size: 15px; padding: 6px; border-radius: 8px; background: #000; color: #fff; border: 1px solid #444; }
     label { display: block; margin: 10px 0; font-size: 14px; color: #ccc; }
+    small { display: block; color: #888; font-size: 12px; margin-top: 4px; }
     #status { margin: 16px 0; color: #aaa; min-height: 24px; }
     #info { display: none; margin-top: 12px; }
     #codigoTexto { font-size: 32px; letter-spacing: 4px; font-weight: bold; color: #4caf50; }
     #info button { margin: 4px 0; }
     #stats { font-size: 13px; color: #aaa; margin-top: 6px; }
+    #barraVer { display: none; gap: 8px; justify-content: center; align-items: center; flex-wrap: wrap; margin-top: 8px; }
     video { display: none; width: 100%; max-width: 960px; margin-top: 12px; background: #000; border-radius: 8px; }
     video.previa { max-width: 320px; }
     #parar { display: none; margin-top: 12px; }
+    /* Modo compacto (link ?c=CODIGO&ver=1): só o vídeo, bom para abrir ao lado de outra página */
+    body.compacto { padding: 8px; }
+    body.compacto h1, body.compacto .cards { display: none; }
+    body.compacto #status { margin: 8px 0; }
+    body.compacto video { max-width: 100%; margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -33,15 +41,18 @@
   <div class="cards">
     <div class="card">
       <h3>Quero compartilhar</h3>
-      <p>Você escolhe a tela e recebe um código para enviar.</p>
 
       <label>Qualidade:
         <select id="qualidade">
-          <option value="auto" selected>Automático (720p, se adapta)</option>
+          <option value="auto">Automático (720p, se adapta)</option>
           <option value="leve">Leve (540p, 30 fps)</option>
           <option value="texto">Slides e texto (720p, 10 fps)</option>
           <option value="alta">Alta (1080p, 30 fps)</option>
         </select>
+      </label>
+      <label>Código da sala (opcional):
+        <input type="text" id="salaFixa" maxlength="12" placeholder="ex: MESA01">
+        <small>Em branco: gera um código novo a cada vez. Com código fixo, o link de quem assiste nunca muda.</small>
       </label>
       <label><input type="checkbox" id="previa"> Mostrar prévia da minha tela (usa mais RAM)</label>
       <label><input type="checkbox" id="audio"> Compartilhar áudio</label>
@@ -51,7 +62,7 @@
       <div id="info">
         <div>Código:</div>
         <div id="codigoTexto"></div>
-        <button id="copiarLink" class="cinza">Copiar link</button><br>
+        <button id="copiarLink" class="cinza">Copiar link de quem assiste</button><br>
         <button id="trocar" class="azul">Trocar tela</button>
         <div id="espectadores"></div>
         <div id="stats"></div>
@@ -61,19 +72,25 @@
     <div class="card">
       <h3>Quero assistir</h3>
       <p>Digite o código que você recebeu.</p>
-      <input type="text" id="codigo" maxlength="6" placeholder="CÓDIGO">
-      <label>Qualidade que quero receber:
-        <select id="qualidadeVer">
-          <option value="auto">Automática</option>
-          <option value="leve">Leve (540p)</option>
-          <option value="muitoleve">Muito leve (360p)</option>
-        </select>
-      </label>
+      <input type="text" id="codigo" maxlength="12" placeholder="CÓDIGO">
       <p><button id="assistir">Assistir</button></p>
     </div>
   </div>
 
   <p id="status"></p>
+
+  <div id="barraVer">
+    <button id="som" class="cinza pequeno">🔊 Ativar som</button>
+    <button id="telaCheia" class="cinza pequeno">⛶ Tela cheia</button>
+    <label style="margin:0">Qualidade:
+      <select id="qualidadeVer">
+        <option value="auto">Automática</option>
+        <option value="leve">Leve (540p)</option>
+        <option value="muitoleve">Muito leve (360p)</option>
+      </select>
+    </label>
+  </div>
+
   <button id="parar" class="vermelho">Parar</button>
   <video id="video" autoplay playsinline muted controls></video>
 
@@ -105,6 +122,14 @@
       leve:      { w: 960, h: 540, fps: 30, bitrate: 1500000 },
       muitoleve: { w: 640, h: 360, fps: 20, bitrate: 600000 }
     };
+
+    let peer = null, stream = null, calls = [], linkAtual = "";
+    let modo = null; // "compartilhando" ou "assistindo"
+    let tempoViewer = null, tempoRetry = null, connViewer = null, codigoViewer = null;
+
+    function status(msg) { $("status").textContent = msg; }
+    function qualidade() { return QUALIDADES[$("qualidade").value]; }
+
     function qualidadeEfetiva(call) {
       const q = qualidade();
       const r = PEDIDOS[call.qualidadePedida];
@@ -115,14 +140,33 @@
       };
     }
 
-    let peer = null, stream = null, calls = [], linkAtual = "";
-    let modo = null; // "compartilhando" ou "assistindo"
-    let tempoViewer = null;
-    let connViewer = null;
+    // ---------- PREFERÊNCIAS SALVAS NO NAVEGADOR ----------
+    function lerPref(chave, padrao) {
+      try {
+        const v = localStorage.getItem("tela:" + chave);
+        return v === null ? padrao : v;
+      } catch (e) { return padrao; }
+    }
+    function salvarPref(chave, valor) {
+      try { localStorage.setItem("tela:" + chave, valor); } catch (e) {}
+    }
 
-    function status(msg) { $("status").textContent = msg; }
-    function qualidade() { return QUALIDADES[$("qualidade").value]; }
+    function limparCodigo(v) {
+      return String(v || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
+    }
 
+    function atualizarTitulo() {
+      if (modo === "compartilhando") document.title = "🔴 Transmitindo (" + calls.length + ")";
+      else if (modo === "assistindo") document.title = "▶ Assistindo";
+      else document.title = "Compartilhar tela";
+    }
+
+    // Avisa antes de fechar a aba se estiver transmitindo
+    window.addEventListener("beforeunload", e => {
+      if (modo === "compartilhando") { e.preventDefault(); e.returnValue = ""; }
+    });
+
+    // ---------- CONFIGURAÇÃO DE REDE ----------
     let configCache = null;
     async function obterConfig() {
       if (configCache) return configCache;
@@ -183,7 +227,7 @@
       return linhas.join("\r\n");
     }
 
-    // Limita o bitrate e os fps enviados a cada espectador
+    // Limita o bitrate, os fps e a resolução enviados a cada espectador
     function limitarBitrate(call) {
       const q = qualidadeEfetiva(call);
       call.peerConnection.getSenders().forEach(sender => {
@@ -210,7 +254,11 @@
         video.style.display = "none";
       }
     }
-    $("previa").onchange = atualizarPrevia;
+    $("previa").onchange = () => { salvarPref("previa", $("previa").checked ? "1" : "0"); atualizarPrevia(); };
+    $("audio").onchange = () => salvarPref("audio", $("audio").checked ? "1" : "0");
+    $("qualidade").onchange = () => salvarPref("qualidade", $("qualidade").value);
+    $("salaFixa").oninput = () => { $("salaFixa").value = limparCodigo($("salaFixa").value); };
+    $("codigo").oninput = () => { $("codigo").value = limparCodigo($("codigo").value); };
 
     function bloquearBotoes() {
       $("parar").style.display = "inline-block";
@@ -220,39 +268,49 @@
 
     // ---------- QUEM COMPARTILHA ----------
     $("compartilhar").onclick = async () => {
+      const digitado = $("salaFixa").value.trim();
+      const fixo = limparCodigo(digitado);
+      if (digitado && fixo.length < 3) {
+        status("O código da sala precisa ter pelo menos 3 letras ou números.");
+        return;
+      }
       try {
         stream = await pedirTela();
       } catch (e) {
         status("Não foi possível compartilhar: " + e.message);
         return;
       }
+      salvarPref("sala", fixo);
       modo = "compartilhando";
+      $("parar").textContent = "Parar";
       stream.getVideoTracks()[0].onended = () => parar();
       bloquearBotoes();
       atualizarPrevia();
+      atualizarTitulo();
       status("Conectando...");
-      abrirComoCompartilhador(0);
+      abrirComoCompartilhador(fixo, 0);
     };
 
-    async function abrirComoCompartilhador(tentativa) {
-      const codigo = gerarCodigo();
+    async function abrirComoCompartilhador(fixo, tentativa) {
+      const codigo = fixo || gerarCodigo();
       const config = await obterConfig();
       if (!stream) return; // clicou em Parar enquanto carregava
-      peer = new Peer(PREFIXO + codigo, { config });
+      const meuPeer = new Peer(PREFIXO + codigo, { config });
+      peer = meuPeer;
 
-      peer.on("disconnected", () => {
-        if (peer && !peer.destroyed) peer.reconnect();
+      meuPeer.on("disconnected", () => {
+        if (!meuPeer.destroyed) meuPeer.reconnect();
       });
 
-      peer.on("open", () => {
-        linkAtual = location.origin + location.pathname + "?c=" + codigo;
+      meuPeer.on("open", () => {
+        linkAtual = location.origin + location.pathname + "?c=" + codigo + "&ver=1";
         $("codigoTexto").textContent = codigo;
         $("info").style.display = "block";
         atualizarEspectadores();
-        status("Compartilhando! Envie o código ou o link para quem vai assistir.");
+        status("Compartilhando! Envie o link (ou o código) para quem vai assistir.");
       });
 
-      peer.on("connection", conn => {
+      meuPeer.on("connection", conn => {
         if (calls.length >= MAX_ESPECTADORES) {
           conn.on("open", () => {
             conn.send("cheio");
@@ -269,7 +327,7 @@
           }
         });
         conn.on("open", () => {
-          call = peer.call(conn.peer, stream, { sdpTransform: preferirH264 });  // sempre manda a tela atual
+          call = meuPeer.call(conn.peer, stream, { sdpTransform: preferirH264 });  // sempre manda a tela atual
           call.qualidadePedida = pedida;
           calls.push(call);
           setTimeout(() => limitarBitrate(call), 1000);
@@ -307,10 +365,23 @@
         });
       });
 
-      peer.on("error", err => {
-        if (err.type === "unavailable-id" && tentativa < 5) {
-          peer.destroy();
-          abrirComoCompartilhador(tentativa + 1);
+      meuPeer.on("error", err => {
+        if (err.type === "unavailable-id") {
+          meuPeer.destroy();
+          if (fixo) {
+            if (tentativa < 3) {
+              status("Esse código ainda está em uso, tentando de novo...");
+              setTimeout(() => { if (stream) abrirComoCompartilhador(fixo, tentativa + 1); }, 1500);
+            } else {
+              status("Esse código de sala já está em uso por outra transmissão. Escolha outro ou deixe em branco.");
+              parar(true);
+            }
+          } else if (tentativa < 5) {
+            abrirComoCompartilhador("", tentativa + 1);
+          } else {
+            status("Não foi possível criar a sala. Tente de novo.");
+            parar(true);
+          }
         } else {
           status("Erro de conexão: " + err.type);
         }
@@ -369,58 +440,85 @@
     function atualizarEspectadores() {
       const n = calls.length;
       $("espectadores").textContent = n + (n === 1 ? " pessoa assistindo" : " pessoas assistindo");
+      atualizarTitulo();
     }
 
     $("copiarLink").onclick = async () => {
       try {
         await navigator.clipboard.writeText(linkAtual);
         $("copiarLink").textContent = "Link copiado!";
-        setTimeout(() => $("copiarLink").textContent = "Copiar link", 2000);
+        setTimeout(() => $("copiarLink").textContent = "Copiar link de quem assiste", 2000);
       } catch (e) {
         prompt("Copie o link:", linkAtual);
       }
     };
 
     // ---------- QUEM ASSISTE ----------
-    $("assistir").onclick = async () => {
-      const codigo = $("codigo").value.trim().toUpperCase();
+    $("assistir").onclick = () => {
+      const codigo = limparCodigo($("codigo").value);
       if (!codigo) { status("Digite o código primeiro."); return; }
-      modo = "assistindo";
-      status("Conectando ao servidor...");
-      bloquearBotoes();
+      iniciarAssistir(codigo);
+    };
 
+    function iniciarAssistir(codigo) {
+      modo = "assistindo";
+      codigoViewer = codigo;
+      $("parar").textContent = "Sair";
+      bloquearBotoes();
+      atualizarTitulo();
+      conectarViewer();
+    }
+
+    // Se a conexão cair ou a transmissão ainda não tiver começado, tenta de novo sozinho
+    async function conectarViewer() {
+      if (modo !== "assistindo") return;
+      status("Conectando ao servidor...");
       const config = await obterConfig();
-      if (modo !== "assistindo") return; // clicou em Parar enquanto carregava
-      peer = new Peer({ config });
-      const meuPeer = peer;
-      let conectou = false;
+      if (modo !== "assistindo") return;
+
+      const meuPeer = new Peer({ config });
+      peer = meuPeer;
+      let conectou = false, cheio = false, encerrado = false;
+
+      const recomecar = msg => {
+        if (encerrado) return;
+        encerrado = true;
+        clearTimeout(tempoViewer);
+        try { meuPeer.destroy(); } catch (e) {}
+        if (peer === meuPeer) peer = null;
+        if (modo !== "assistindo") return;
+        video.srcObject = null;
+        video.style.display = "none";
+        $("barraVer").style.display = "none";
+        status(msg + " Tentando de novo em alguns segundos...");
+        tempoRetry = setTimeout(conectarViewer, 5000);
+      };
 
       tempoViewer = setTimeout(() => {
-        if (conectou || peer !== meuPeer) return;
-        status("Não conseguiu conectar. Pode ser a rede (4G, wi-fi de empresa ou escola). Tente trocar de rede e clique em Assistir de novo.");
-        parar(true);
+        if (!conectou) recomecar("Ainda não conectou (pode ser a rede).");
       }, 25000);
 
-      peer.on("open", () => {
+      meuPeer.on("open", () => {
         status("Procurando quem está compartilhando...");
-        const conn = peer.connect(PREFIXO + codigo);
+        const conn = meuPeer.connect(PREFIXO + codigoViewer);
         connViewer = conn;
         conn.on("open", () => {
           status("Achou! Estabelecendo a conexão de vídeo...");
           pedirQualidade();
         });
-        let cheio = false;
         conn.on("data", d => {
           if (d === "cheio") {
             cheio = true;
+            encerrado = true;
+            clearTimeout(tempoViewer);
             status("Essa transmissão está cheia (limite de " + MAX_ESPECTADORES + " pessoas). Tente de novo mais tarde.");
             parar(true);
           }
         });
-        conn.on("close", () => { if (!cheio) status("O compartilhamento terminou."); });
+        conn.on("close", () => { if (!cheio) recomecar("A transmissão terminou."); });
       });
 
-      peer.on("call", call => {
+      meuPeer.on("call", call => {
         call.answer(); // aceita a chamada sem enviar nada
         call.on("stream", s => {
           conectou = true;
@@ -428,36 +526,16 @@
           video.classList.remove("previa");
           video.srcObject = s;
           video.style.display = "block";
-          status("Assistindo. Se quiser ouvir o som, ative no player do vídeo.");
+          $("barraVer").style.display = "flex";
+          status("Assistindo.");
         });
       });
 
-      peer.on("error", err => {
-        if (err.type === "peer-unavailable") {
-          status("Código não encontrado. Confira se a pessoa ainda está compartilhando.");
-        } else {
-          status("Erro de conexão: " + err.type);
-        }
-        parar(true);
+      meuPeer.on("error", err => {
+        if (err.type === "peer-unavailable") recomecar("Aguardando a transmissão começar.");
+        else recomecar("Erro de conexão (" + err.type + ").");
       });
-    };
-
-    // ---------- PARAR ----------
-    function parar(manterMensagem) {
-      if (stream) stream.getTracks().forEach(t => { t.onended = null; t.stop(); });
-      if (peer) peer.destroy();
-      clearTimeout(tempoViewer);
-      connViewer = null;
-      stream = null; peer = null; calls = []; modo = null;
-      video.srcObject = null;
-      video.style.display = "none";
-      $("parar").style.display = "none";
-      $("info").style.display = "none";
-      $("compartilhar").disabled = false;
-      $("assistir").disabled = false;
-      if (manterMensagem !== true) status("Encerrado.");
     }
-    $("parar").onclick = () => parar();
 
     function pedirQualidade() {
       try {
@@ -466,18 +544,65 @@
         }
       } catch (e) {}
     }
-    $("qualidadeVer").onchange = pedirQualidade;
+    $("qualidadeVer").onchange = () => {
+      salvarPref("qualidadeVer", $("qualidadeVer").value);
+      pedirQualidade();
+    };
 
-    // No celular, já começa pedindo qualidade leve
+    // Som e tela cheia
+    $("som").onclick = () => {
+      video.muted = !video.muted;
+      $("som").textContent = video.muted ? "🔊 Ativar som" : "🔇 Silenciar";
+    };
+    function alternarTelaCheia() {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else if (video.requestFullscreen) video.requestFullscreen();
+      else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+    }
+    $("telaCheia").onclick = alternarTelaCheia;
+    video.ondblclick = alternarTelaCheia;
+
+    // ---------- PARAR ----------
+    function parar(manterMensagem) {
+      clearTimeout(tempoViewer);
+      clearTimeout(tempoRetry);
+      connViewer = null;
+      codigoViewer = null;
+      if (stream) stream.getTracks().forEach(t => { t.onended = null; t.stop(); });
+      if (peer) { try { peer.destroy(); } catch (e) {} }
+      stream = null; peer = null; calls = []; modo = null;
+      video.srcObject = null;
+      video.style.display = "none";
+      $("parar").style.display = "none";
+      $("info").style.display = "none";
+      $("barraVer").style.display = "none";
+      $("compartilhar").disabled = false;
+      $("assistir").disabled = false;
+      document.body.classList.remove("compacto");
+      atualizarTitulo();
+      if (manterMensagem !== true) status("Encerrado.");
+    }
+    $("parar").onclick = () => parar();
+
+    // ---------- AO ABRIR A PÁGINA ----------
     const ehCelular = (navigator.userAgentData && navigator.userAgentData.mobile) ||
                       /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    if (ehCelular) $("qualidadeVer").value = "leve";
 
-    // Se abriu por um link com ?c=CODIGO, já preenche o código
-    const codigoDaURL = new URLSearchParams(location.search).get("c");
+    let qSalva = lerPref("qualidade", "auto");
+    $("qualidade").value = QUALIDADES[qSalva] ? qSalva : "auto";
+    $("audio").checked = lerPref("audio", "0") === "1";
+    $("previa").checked = lerPref("previa", "0") === "1";
+    $("salaFixa").value = limparCodigo(lerPref("sala", ""));
+    let qVerSalva = lerPref("qualidadeVer", ehCelular ? "leve" : "auto");
+    $("qualidadeVer").value = (qVerSalva === "auto" || PEDIDOS[qVerSalva]) ? qVerSalva : "auto";
+
+    // Link com ?c=CODIGO: entra direto. Com &ver=1, mostra só o vídeo (modo compacto)
+    const params = new URLSearchParams(location.search);
+    const codigoDaURL = limparCodigo(params.get("c"));
     if (codigoDaURL) {
-      $("codigo").value = codigoDaURL.toUpperCase();
-      status("Código preenchido. Clique em Assistir.");
+      $("codigo").value = codigoDaURL;
+      if (params.get("ver") === "1") document.body.classList.add("compacto");
+      iniciarAssistir(codigoDaURL);
     }
   </script>
 </body>
