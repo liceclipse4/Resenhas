@@ -36,8 +36,10 @@
 
       <label>Qualidade:
         <select id="qualidade">
-          <option value="minima">Mínima (480p, 5 fps)</option>
-          <option value="baixa" selected>Econômica (720p, 10 fps)</option>
+          <option value="jogoleve" selected>Jogo leve (540p, 30 fps)</option>
+          <option value="jogo">Jogo (720p, 30 fps)</option>
+          <option value="minima">Mínima, para slides/texto (480p, 5 fps)</option>
+          <option value="baixa">Econômica, para slides/texto (720p, 10 fps)</option>
           <option value="media">Média (720p, 15 fps)</option>
           <option value="alta">Alta (1080p, 30 fps)</option>
         </select>
@@ -87,7 +89,9 @@
       minima: { w: 854,  h: 480,  fps: 5,  bitrate: 400000,  hint: "detail" },
       baixa:  { w: 1280, h: 720,  fps: 10, bitrate: 800000,  hint: "detail" },
       media:  { w: 1280, h: 720,  fps: 15, bitrate: 1500000, hint: "motion" },
-      alta:   { w: 1920, h: 1080, fps: 30, bitrate: 3500000, hint: "motion" }
+      alta:   { w: 1920, h: 1080, fps: 30, bitrate: 3500000, hint: "motion" },
+      jogoleve: { w: 960,  h: 540,  fps: 30, bitrate: 1500000, hint: "motion" },
+      jogo:     { w: 1280, h: 720,  fps: 30, bitrate: 2500000, hint: "motion" }
     };
 
     let peer = null, stream = null, calls = [], linkAtual = "";
