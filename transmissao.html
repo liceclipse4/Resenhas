@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Compartilhar tela</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #111; color: #eee; text-align: center; margin: 0; padding: 24px; }
+    h1 { margin-top: 0; }
+    .cards { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+    .card { background: #1c1c1c; border-radius: 12px; padding: 20px; width: 300px; }
+    button { font-size: 16px; padding: 10px 20px; border: 0; border-radius: 8px; cursor: pointer; background: #4caf50; color: #fff; }
+    button.vermelho { background: #e53935; }
+    button.cinza { background: #555; }
+    button:disabled { opacity: .4; cursor: not-allowed; }
+    input { font-size: 18px; padding: 8px; width: 140px; text-align: center; text-transform: uppercase; border-radius: 8px; border: 1px solid #444; background: #000; color: #fff; }
+    #status { margin: 16px 0; color: #aaa; min-height: 24px; }
+    #info { display: none; margin-top: 12px; }
+    #codigoTexto { font-size: 32px; letter-spacing: 4px; font-weight: bold; color: #4caf50; }
+    video { display: none; width: 100%; max-width: 960px; margin-top: 12px; background: #000; border-radius: 8px; }
+    #parar { display: none; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Compartilhar tela</h1>
+
+  <div class="cards" id="cards">
+    <div class="card">
+      <h3>Quero compartilhar</h3>
+      <p>Você escolhe a tela e recebe um código para enviar.</p>
+      <button id="compartilhar">Compartilhar minha tela</button>
+      <div id="info">
+        <div>Código:</div>
+        <div id="codigoTexto"></div>
+        <p><button id="copiarLink" class="cinza">Copiar link</button></p>
+        <div id="espectadores"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Quero assistir</h3>
+      <p>Digite o código que você recebeu.</p>
+      <input id="codigo" maxlength="6" placeholder="CÓDIGO">
+      <p><button id="assistir">Assistir</button></p>
+    </div>
+  </div>
+
+  <p id="status"></p>
+  <button id="parar" class="vermelho">Parar</button>
+  <video id="video" autoplay playsinline muted controls></video>
+
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script>
+    const $ = id => document.getElementById(id);
+    const video = $("video");
+    const PREFIXO = "telasimples-";
+    let peer = null, stream = null, espectadores = 0;
+    let linkAtual = "";
+
+    function status(msg) { $("status").textContent = msg; }
+
+    function gerarCodigo() {
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      let s = "";
+      for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+      return s;
+    }
+
+    function mostrarVideo() {
+      video.style.display = "block";
+      $("parar").style.display = "inline-block";
+      $("compartilhar").disabled = true;
+      $("assistir").disabled = true;
+    }
+
+    // ---------- QUEM COMPARTILHA ----------
+    $("compartilhar").onclick = async () => {
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      } catch (e) {
+        status("Não foi possível compartilhar: " + e.message);
+        return;
+      }
+      video.srcObject = stream;          // prévia da sua própria tela
+      stream.getVideoTracks()[0].onended = parar;
+      mostrarVideo();
+      status("Conectando...");
+      abrirComoCompartilhador(0);
+    };
+
+    function abrirComoCompartilhador(tentativa) {
+      const codigo = gerarCodigo();
+      peer = new Peer(PREFIXO + codigo);
+
+      peer.on("open", () => {
+        linkAtual = location.origin + location.pathname + "?c=" + codigo;
+        $("codigoTexto").textContent = codigo;
+        $("info").style.display = "block";
+        status("Compartilhando! Envie o código ou o link para quem vai assistir.");
+      });
+
+      peer.on("connection", conn => {
+        conn.on("open", () => {
+          peer.call(conn.peer, stream);   // manda a tela para quem entrou
+          espectadores++;
+          atualizarEspectadores();
+        });
+        conn.on("close", () => {
+          espectadores = Math.max(0, espectadores - 1);
+          atualizarEspectadores();
+        });
+      });
+
+      peer.on("error", err => {
+        if (err.type === "unavailable-id" && tentativa < 5) {
+          peer.destroy();
+          abrirComoCompartilhador(tentativa + 1);
+        } else {
+          status("Erro de conexão: " + err.type);
+        }
+      });
+    }
+
+    function atualizarEspectadores() {
+      $("espectadores").textContent = espectadores + (espectadores === 1 ? " pessoa assistindo" : " pessoas assistindo");
+    }
+
+    $("copiarLink").onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(linkAtual);
+        $("copiarLink").textContent = "Link copiado!";
+        setTimeout(() => $("copiarLink").textContent = "Copiar link", 2000);
+      } catch (e) {
+        prompt("Copie o link:", linkAtual);
+      }
+    };
+
+    // ---------- QUEM ASSISTE ----------
+    $("assistir").onclick = () => {
+      const codigo = $("codigo").value.trim().toUpperCase();
+      if (!codigo) { status("Digite o código primeiro."); return; }
+      status("Conectando...");
+      mostrarVideo();
+      video.style.display = "none";
+
+      peer = new Peer();
+
+      peer.on("open", () => {
+        const conn = peer.connect(PREFIXO + codigo);
+        conn.on("close", () => status("O compartilhamento terminou."));
+      });
+
+      peer.on("call", call => {
+        call.answer();                    // aceita a chamada, sem enviar nada
+        call.on("stream", s => {
+          video.srcObject = s;
+          video.style.display = "block";
+          status("Assistindo. Se quiser ouvir o som, ative no player do vídeo.");
+        });
+      });
+
+      peer.on("error", err => {
+        if (err.type === "peer-unavailable") {
+          status("Código não encontrado. Confira se a pessoa ainda está compartilhando.");
+        } else {
+          status("Erro de conexão: " + err.type);
+        }
+        parar(true);
+      });
+    };
+
+    // ---------- PARAR ----------
+    function parar(manterMensagem) {
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      if (peer) peer.destroy();
+      stream = null; peer = null; espectadores = 0;
+      video.srcObject = null;
+      video.style.display = "none";
+      $("parar").style.display = "none";
+      $("info").style.display = "none";
+      $("compartilhar").disabled = false;
+      $("assistir").disabled = false;
+      if (manterMensagem !== true) status("Encerrado.");
+    }
+    $("parar").onclick = () => parar();
+
+    // Se abriu por um link com ?c=CODIGO, já preenche o código
+    const codigoDaURL = new URLSearchParams(location.search).get("c");
+    if (codigoDaURL) {
+      $("codigo").value = codigoDaURL.toUpperCase();
+      status("Código preenchido. Clique em Assistir.");
+    }
+  </script>
+</body>
+</html>
